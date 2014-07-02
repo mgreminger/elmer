@@ -151,7 +151,7 @@ SUBROUTINE StatElecSolver( Model,Solver,dt,TransientSimulation )
   TYPE(Variable_t), POINTER :: TimeVar, Var
   TYPE(Nodes_t) :: ElementNodes
   
-  REAL (KIND=DP), POINTER :: ForceVector(:), Potential(:), Displacement(:,:)
+  REAL (KIND=DP), POINTER :: ForceVector(:), Potential(:)
   REAL (KIND=DP), POINTER :: Field(:),Flux(:),Energy(:),PermIso(:)
   REAL (KIND=dp), POINTER :: PValues(:),Charges(:)
   REAL (KIND=DP), POINTER :: Pwrk(:,:,:), Pz_w(:,:,:)
@@ -159,6 +159,9 @@ SUBROUTINE StatElecSolver( Model,Solver,dt,TransientSimulation )
   REAL (KIND=DP), ALLOCATABLE ::  Permittivity(:,:,:), PiezoCoeff(:,:,:), &
       LocalStiffMatrix(:,:), Load(:), LocalForce(:), PotDiff(:), &
       Alpha(:), Beta(:),LayerH(:),LayerV(:)
+
+  REAL(KIND=dp),ALLOCATABLE:: LocalTemperature(:),ElasticModulus(:,:,:),PoissonRatio(:), &
+      HeatExpansionCoeff(:,:,:),LocalDisplacement(:,:),ReferenceTemperature(:)
   
   REAL(KIND=dp) :: RelPerm1, RelPerm2
   REAL(KIND=dp) :: PermittivityOfVacuum, Norm, RelativeChange
@@ -192,9 +195,10 @@ SUBROUTINE StatElecSolver( Model,Solver,dt,TransientSimulation )
       AllocationsDone, Permittivity, &
       CapBodies, CalculateCapMatrix, CapBodyIndex, &
       CapMatrix, CalculateField, CapMatrixFile, ConstantWeights, &
-      PiezoCoeff, PiezoMaterial, Displacement, Pz_w, &
+      PiezoCoeff, PiezoMaterial, Pz_w, &
       ConstantBulk, AssemblyDone, Alpha, Beta, LayerH, LayerV, &
-      PermIso
+      PermIso, LocalTemperature, LocalDisplacement, ElasticModulus, PoissonRatio, &
+      HeatExpansionCoeff, ReferenceTemperature
   
   
   INTERFACE
@@ -265,7 +269,12 @@ SUBROUTINE StatElecSolver( Model,Solver,dt,TransientSimulation )
         LocalStiffMatrix(N,N), &
         Load(N),               &
         PotDiff(N),            &
-        Displacement(N,Dim),   &
+        LocalTemperature(N),   &
+        ReferenceTemperature(N),&
+        LocalDisplacement(3,N),&
+        ElasticModulus(6,6,N), &
+        PoissonRatio(N),       &
+        HeatExpansionCoeff(3,3,N), &
         STAT=istat )
     
     IF ( istat /= 0 ) THEN
@@ -579,6 +588,9 @@ SUBROUTINE StatElecSolver( Model,Solver,dt,TransientSimulation )
 !------------------------------------------------------------------------------
   SUBROUTINE BulkAssembly()
 !------------------------------------------------------------------------------
+    LOGICAL :: Isotropic(2), PlaneStress, Found, stat, GotHeatExp
+    TYPE(ValueList_t),POINTER :: Equation, Material
+
 !$omp parallel
 !$omp do ordered
     DO t = 1,GetNOFActive()
@@ -657,28 +669,47 @@ SUBROUTINE StatElecSolver( Model,Solver,dt,TransientSimulation )
             PiezoCoeff( i,j,1:n ) = Pz_w(i,j,1:n)
           END DO
         END DO
+      END IF
 
 !------------------------------------------------------------------------------
-!      Read also the local displacement
-!------------------------------------------------------------------------------         
-        Displacement = 0.0d0
-        NULLIFY (Var)
-        Var => VariableGet( Model % Variables, 'Displacement' )
-        IF ( .NOT. ASSOCIATED( Var ) )  THEN
-          CALL Fatal('StatElecSolve', 'No displacements' )
+!      Read elastic properties which needed to calculate stress
+!      Needed only for PiezoMaterial
+!------------------------------------------------------------------------------
+      IF ( PiezoMaterial ) THEN
+
+        Material => GetMaterial()
+        Equation => GetEquation()
+
+        CALL InputTensor( HeatExpansionCoeff, Isotropic(2),  &
+            'Heat Expansion Coefficient', Material, n, CurrentElement % NodeIndexes, GotHeatExp )
+
+        CALL InputTensor( ElasticModulus, Isotropic(1), &
+                'Youngs Modulus', Material, n, CurrentElement % NodeIndexes )
+        PlaneStress = ListGetLogical( Equation, 'Plane Stress', stat )
+        PoissonRatio(1:n) = GetReal( Material, 'Poisson Ratio', Stat )
+
+        ! Displacement field at element nodal points:
+        ! -------------------------------------------
+        CALL GetVectorLocalSolution( LocalDisplacement, USolver=Solver )
+
+        IF( GotHeatExp ) THEN
+          ReferenceTemperature(1:n) = GetReal(Material, 'Reference Temperature', Found )
+          CALL GetScalarLocalSolution( LocalTemperature, 'Temperature', USolver=Solver )
+          LocalTemperature(1:n) = LocalTemperature(1:n) - ReferenceTemperature(1:n)
+        ELSE
+          LocalTemperature(1:n) = 0.0_dp
         END IF
-        DO i = 1, Var % DOFs
-          Displacement(1:n,i) = &
-              Var % Values( Var % DOFs * ( Var % Perm( NodeIndexes ) - 1 ) + i )
-        END DO
+
       END IF
+
 
 !------------------------------------------------------------------------------
 !      Get element local matrix, and rhs vector
 !------------------------------------------------------------------------------
       CALL StatElecCompose( LocalStiffMatrix,LocalForce, PiezoMaterial, &
           PiezoCoeff, Permittivity,Load,CurrentElement,n,ntot,ElementNodes, &
-          Displacement )
+          LocalDisplacement, PoissonRatio, ElasticModulus, HeatExpansionCoeff, &
+          LocalTemperature, Isotropic, PlaneStress)
        
 !------------------------------------------------------------------------------
 !      Update global matrix and rhs vector from local matrix & vector
@@ -1188,25 +1219,29 @@ SUBROUTINE StatElecSolver( Model,Solver,dt,TransientSimulation )
  
 !------------------------------------------------------------------------------
      SUBROUTINE StatElecCompose( StiffMatrix,Force,PiezoMaterial, PiezoCoeff, &
-                            Permittivity,Load,Element,n,ntot,Nodes, Displacement )
+                    Permittivity,Load,Element,n,ntot,Nodes, LocalDisplacement, &
+                    PoissonRatio, ElasticModulus, HeatExpansionCoeff, &
+                    LocalTemperature, Isotropic, PlaneStress )
 !------------------------------------------------------------------------------
        REAL(KIND=dp) :: StiffMatrix(:,:),Force(:),Load(:), Permittivity(:,:,:)
-       REAL(KIND=dp) :: PiezoCoeff(:,:,:), Displacement(:,:)
-       INTEGER :: n
+       REAL(KIND=dp) :: PiezoCoeff(:,:,:), LocalDisplacement(:,:),PoissonRatio(:)
+       REAL(KIND=dp) :: ElasticModulus(:,:,:),HeatExpansionCoeff(:,:,:),LocalTemperature(:)
+       INTEGER :: n, ntot
        TYPE(Nodes_t) :: Nodes
        TYPE(Element_t), POINTER :: Element
-       LOGICAL :: PiezoMaterial
+       LOGICAL :: PiezoMaterial, Isotropic(2), PlaneStress
 !------------------------------------------------------------------------------
  
        REAL(KIND=dp) :: SqrtMetric,Metric(3,3),Symb(3,3,3),dSymb(3,3,3,3)
        REAL(KIND=dp) :: Basis(ntot),dBasisdx(ntot,3)
        REAL(KIND=dp) :: SqrtElementMetric,U,V,W,S,A,L,C(3,3),x,y,z
-       REAL(KIND=dp) :: PiezoForce(n), PiezoLoad(3)
-       REAL(KIND=dp) :: LocalStrain(3,3),LocalStress(3,3)
+       REAL(KIND=dp) :: PiezoForce(n), PiezoLoad(ntot,1)
+       REAL(KIND=dp) :: Strain(3,3),Stress(3,3)
+       REAL(KIND=dp) :: D(3,6), StressVector(6,1) ! piezo coeff matrix D
 
        LOGICAL :: Stat, CSymmetry
 
-       INTEGER :: i,j,p,q,t,DIM,ntot,Nbasis
+       INTEGER :: i,j,p,q,t,DIM,Nbasis
  
        TYPE(GaussIntegrationPoints_t) :: IntegStuff
 !------------------------------------------------------------------------------
@@ -1258,27 +1293,29 @@ SUBROUTINE StatElecSolver( Model,Solver,dt,TransientSimulation )
 !------------------------------------------------------------------------------
 
          IF ( PiezoMaterial ) THEN
-           ! So far only plane strain in 2D  (LocalStrain(3) = 0)           
-           LocalStrain = 0.0d0
-           DO i = 1, Dim
-             LocalStrain(i) = SUM( dBasisdx(1:n,i) * Displacement(1:n,i) )
-           END DO
-           LocalStrain(4) = 0.5d0 * ( SUM( dBasisdx(1:n,1) * Displacement(1:n,2) ) &
-               + SUM( dBasisdx(1:n,2) * Displacement(1:n,1) ) )
-           IF ( Dim == 3 ) THEN
-             LocalStrain(5) = 0.5d0 * ( SUM( dBasisdx(1:n,2) * Displacement(1:n,3) ) &
-                 + SUM( dBasisdx(1:n,3) * Displacement(1:n,2) ) )
-             LocalStrain(6) = 0.5d0 * ( SUM( dBasisdx(1:n,1) * Displacement(1:n,3) ) &
-                 + SUM( dBasisdx(1:n,3) * Displacement(1:n,1) ) )
-           END IF
-           
-           PiezoLoad = 0.0d0
-           DO i = 1, Dim
-             DO j = 1, 2*Dim
-               PiezoLoad(i) = PiezoLoad(i) + SUM( Basis(1:n) * PiezoCoeff(i,j,1:n) ) * &
-                   LocalStrain(j)
-             END DO
-           END DO
+             CALL LocalStress( Stress, Strain, PoissonRatio, &
+                  ElasticModulus, HeatExpansionCoeff, LocalTemperature, &
+                  Isotropic, CSymmetry, PlaneStress, LocalDisplacement, &
+                  Basis, dBasisdx, Nodes, dim, n, ntot )
+
+            PiezoLoad = 0.0d0
+
+            ! Get the piezo coefficients for the current integration point
+            DO i=1,SIZE(PiezoCoeff,1)
+              DO j=1,SIZE(PiezoCoeff,2)
+                 D(i,j) = SUM( Basis(1:n) * PiezoCoeff(i,j,1:n) )
+              END DO
+            END DO
+
+            ! construct the stress vector needed for to calc the piezo load
+            StressVector(1,1) = Stress(1,1)
+            StressVector(2,1) = Stress(2,2)
+            StressVector(3,1) = Stress(3,3)
+            StressVector(4,1) = Stress(2,3)
+            StressVector(5,1) = Stress(1,3)
+            StressVector(6,1) = Stress(1,2)
+
+            PiezoLoad = MATMUL(dBasisdx, MATMUL(D,StressVector))
          END IF
          
 !------------------------------------------------------------------------------
@@ -1304,7 +1341,7 @@ SUBROUTINE StatElecSolver( Model,Solver,dt,TransientSimulation )
            Force(p) = Force(p) + S*L*Basis(p)
 
            IF ( PiezoMaterial ) THEN
-             PiezoForce(p) = PiezoForce(p) + S * SUM( dBasisdx(p,1:3) * PiezoLoad(1:3) )
+             PiezoForce(p) = PiezoForce(p) + S * PiezoLoad(p,1)
            END IF
 
         END DO
@@ -1313,8 +1350,7 @@ SUBROUTINE StatElecSolver( Model,Solver,dt,TransientSimulation )
 !$omp end do
 !$omp end parallel
 
-       IF ( PiezoMaterial )  Force = Force + PiezoForce
-!       IF ( PiezoMaterial )  Force = Force + PiezoForce / PermittivityOfVacuum ?
+       IF ( PiezoMaterial )  Force = Force + PiezoForce / PermittivityOfVacuum
 
 !------------------------------------------------------------------------------
      END SUBROUTINE StatElecCompose
