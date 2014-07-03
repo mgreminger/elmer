@@ -690,7 +690,7 @@ SUBROUTINE StatElecSolver( Model,Solver,dt,TransientSimulation )
 
         ! Displacement field at element nodal points:
         ! -------------------------------------------
-        CALL GetVectorLocalSolution( LocalDisplacement, USolver=Solver )
+        CALL GetVectorLocalSolution( LocalDisplacement, 'Displacement', USolver=Solver )
 
         IF( GotHeatExp ) THEN
           ReferenceTemperature(1:n) = GetReal(Material, 'Reference Temperature', Found )
