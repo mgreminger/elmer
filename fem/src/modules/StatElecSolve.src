@@ -741,59 +741,59 @@ SUBROUTINE StatElecSolver( Model,Solver,dt,TransientSimulation )
 !------------------------------------------------------------------------------
 !     Neumann boundary conditions
 !------------------------------------------------------------------------------
-    CM => Solver % Matrix % ConstraintMatrix
-    IF (ASSOCIATED(CM) ) THEN
-      CM % Values = 0._dp
-      IF ( .NOT. CM % Ordered ) CALL CRS_SortMatrix(CM)
-
-      ALLOCATE( Done(Solver % Mesh % NumberOfNodes) )
-      Done = .FALSE.
-
-      Ivals => ListGetIntegerArray( Params, &
-             'Constraint DOF 1 Body', Gotit )
-      IF ( .NOT. ASSOCIATED(Ivals) ) CONTINUE
-
-      Solver % Matrix % ConstraintMatrix % RHS(1) = &
-        GetCReal( Params, 'Constraint DOF 1 Value', GotIt )
-
-!$omp parallel
-!$omp do
-      DO i=1,GetNOFBoundaryElements()
-        CurrentElement => GetBoundaryElement(i)
-        IF ( .NOT.ActiveBoundaryElement() ) CYCLE
-    
-        j = -1
-        IF ( ASSOCIATED(CurrentElement % BoundaryInfo % Left) ) &
-          j = CurrentElement % BoundaryInfo % Left % BodyId
-
-        k = -1
-        IF ( ASSOCIATED(CurrentElement % BoundaryInfo % Right) ) &
-          k = CurrentElement % BoundaryInfo % Right % BodyId
-
-        IF ( ANY(Ivals==j.OR.Ivals==k) ) THEN
-          NodeIndexes => CurrentElement % NodeIndexes
-          DO j=1,GetElementNOFNodes()
-            l = PotentialPerm(NodeIndexes(j))
-            IF ( Done(l) ) CYCLE
-            Done(l) = .TRUE.
-            CM % RHS(1) = CM % RHS(1)+Solver % Matrix % RHS(l)
-            m = CM % Rows(1)
-            DO k=Solver % Matrix % Rows(l),Solver % Matrix % Rows(l+1)-1
-              DO WHILE(m<CM % Rows(2))
-                IF ( CM % Cols(m)>=Solver % Matrix % Cols(k) ) EXIT
-                m = m+1  
-              END DO
-              IF ( m>=CM % Rows(2) ) EXIT
-              IF ( CM % Cols(m) == Solver % Matrix % Cols(k) ) &
-                CM % Values(m) = CM % Values(m)+Solver % Matrix % Values(k)
-            END DO
-          END DO
-        END IF
-      END DO
-!$omp end do
-!$omp end parallel
-      DEALLOCATE(Done)
-    END IF
+!    CM => Solver % Matrix % ConstraintMatrix
+!    IF (ASSOCIATED(CM) ) THEN
+!      CM % Values = 0._dp
+!      IF ( .NOT. CM % Ordered ) CALL CRS_SortMatrix(CM)
+!
+!      ALLOCATE( Done(Solver % Mesh % NumberOfNodes) )
+!      Done = .FALSE.
+!
+!      Ivals => ListGetIntegerArray( Params, &
+!             'Constraint DOF 1 Body', Gotit )
+!      IF ( .NOT. ASSOCIATED(Ivals) ) CONTINUE
+!
+!      Solver % Matrix % ConstraintMatrix % RHS(1) = &
+!        GetCReal( Params, 'Constraint DOF 1 Value', GotIt )
+!
+!!$omp parallel
+!!$omp do
+!      DO i=1,GetNOFBoundaryElements()
+!        CurrentElement => GetBoundaryElement(i)
+!        IF ( .NOT.ActiveBoundaryElement() ) CYCLE
+!
+!        j = -1
+!        IF ( ASSOCIATED(CurrentElement % BoundaryInfo % Left) ) &
+!          j = CurrentElement % BoundaryInfo % Left % BodyId
+!
+!        k = -1
+!        IF ( ASSOCIATED(CurrentElement % BoundaryInfo % Right) ) &
+!          k = CurrentElement % BoundaryInfo % Right % BodyId
+!
+!        IF ( ANY(Ivals==j.OR.Ivals==k) ) THEN
+!          NodeIndexes => CurrentElement % NodeIndexes
+!          DO j=1,GetElementNOFNodes()
+!            l = PotentialPerm(NodeIndexes(j))
+!            IF ( Done(l) ) CYCLE
+!            Done(l) = .TRUE.
+!            CM % RHS(1) = CM % RHS(1)+Solver % Matrix % RHS(l)
+!            m = CM % Rows(1)
+!            DO k=Solver % Matrix % Rows(l),Solver % Matrix % Rows(l+1)-1
+!              DO WHILE(m<CM % Rows(2))
+!                IF ( CM % Cols(m)>=Solver % Matrix % Cols(k) ) EXIT
+!                m = m+1
+!              END DO
+!              IF ( m>=CM % Rows(2) ) EXIT
+!              IF ( CM % Cols(m) == Solver % Matrix % Cols(k) ) &
+!                CM % Values(m) = CM % Values(m)+Solver % Matrix % Values(k)
+!            END DO
+!          END DO
+!        END IF
+!      END DO
+!!$omp end do
+!!$omp end parallel
+!      DEALLOCATE(Done)
+!    END IF
     
     MinPotential = HUGE(MinPotential)
     MaxPotential = -HUGE(MaxPotential)
